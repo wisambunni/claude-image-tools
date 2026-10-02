@@ -1,0 +1,10 @@
+{
+  "name": "image-tools",
+  "version": "0.1.0",
+  "description": "Image inspection and editing tools for Claude: view any format, pixel grids, zoom, tiles, crop, resize, rotate, adjust and convert between PNG, JPEG, WebP, HEIC, AVIF, GIF, TIFF, BMP, ICO and PDF.",
+  "author": {
+    "name": "Wisam Bunni"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["image", "crop", "resize", "convert", "vision", "heic", "webp"]
+}

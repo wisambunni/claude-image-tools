@@ -1,0 +1,108 @@
+{
+  "manifest_version": "0.4",
+  "name": "image-tools",
+  "display_name": "Image Tools",
+  "version": "0.1.0",
+  "description": "Let Claude see and edit images, including ones you paste: zoom, pixel grids, crop, resize, rotate, adjust and convert.",
+  "long_description": "Gives Claude tools to inspect image files on your computer in more detail than a downscaled preview allows (zoom into regions at full resolution, split large images into tiles, overlay a pixel-coordinate grid) and to edit them: crop, resize (fit, fill, pad, stretch), rotate and flip, adjust brightness and contrast, and convert between PNG, JPEG, WebP, HEIC, AVIF, GIF, TIFF, BMP, ICO and PDF. Originals are never modified; results are saved next to the source file.",
+  "author": {
+    "name": "Wisam Bunni"
+  },
+  "license": "Apache-2.0",
+  "icon": "icon.png",
+  "keywords": [
+    "image",
+    "crop",
+    "resize",
+    "convert",
+    "heic",
+    "webp",
+    "vision"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "server/image_tools.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--directory",
+        "${__dirname}",
+        "server/image_tools.py"
+      ],
+      "env": {
+        "IMAGE_TOOLS_OUTPUT_DIR": "${user_config.output_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "image_info",
+      "description": "Dimensions, format, color mode, file size and key EXIF data"
+    },
+    {
+      "name": "view_image",
+      "description": "Show any image file, including HEIC, TIFF, AVIF and BMP"
+    },
+    {
+      "name": "find_images",
+      "description": "Find recent images and chat attachments as numbered thumbnails"
+    },
+    {
+      "name": "grid_overlay",
+      "description": "Overlay a labeled pixel-coordinate grid for precise cropping"
+    },
+    {
+      "name": "zoom_image",
+      "description": "Inspect a region at full resolution to read small text and detail"
+    },
+    {
+      "name": "split_tiles",
+      "description": "Split a large image into overlapping tiles shown at full detail"
+    },
+    {
+      "name": "crop_image",
+      "description": "Crop to a pixel or fractional box and save"
+    },
+    {
+      "name": "resize_image",
+      "description": "Resize by scale or dimensions with fit, fill, pad or stretch"
+    },
+    {
+      "name": "rotate_flip_image",
+      "description": "Rotate by any angle and/or mirror"
+    },
+    {
+      "name": "adjust_image",
+      "description": "Brightness, contrast, sharpness, saturation, autocontrast, grayscale"
+    },
+    {
+      "name": "convert_image",
+      "description": "Convert between PNG, JPEG, WebP, HEIC, AVIF, GIF, TIFF, BMP, ICO and PDF"
+    },
+    {
+      "name": "copy_to_clipboard",
+      "description": "Put an image on the clipboard to paste anywhere"
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "python": ">=3.10,<3.14"
+    }
+  },
+  "user_config": {
+    "output_dir": {
+      "type": "directory",
+      "title": "Output folder",
+      "description": "Where edited copies of pasted or clipboard images are saved.",
+      "default": "${DOWNLOADS}/Claude Images",
+      "required": false
+    }
+  }
+}
