@@ -1,0 +1,14 @@
+{
+  "name": "claude-image-tools",
+  "description": "Image inspection and editing tools for Claude Code.",
+  "owner": {
+    "name": "Wisam Bunni"
+  },
+  "plugins": [
+    {
+      "name": "image-tools",
+      "source": "./",
+      "description": "Crop, zoom, resize, convert and inspect images from Claude."
+    }
+  ]
+}

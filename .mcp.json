@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "image-tools": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--script", "${CLAUDE_PLUGIN_ROOT}/server/image_tools.py"]
+    }
+  }
+}
