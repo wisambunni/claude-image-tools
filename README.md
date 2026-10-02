@@ -9,7 +9,19 @@ It ships as both:
 
 ## Why
 
-Claude sees images downscaled to about 1568px on the long edge, so small text in screenshots, scanned documents and photos gets lost, and guessed crop coordinates are often off. These tools let Claude look closer before it answers and check every edit it makes.
+Claude sees images downscaled: to 2576px on the long edge for Claude 4.7 and later, 1568px for older models. Small text in blueprints, charts, scanned documents and large screenshots gets lost or misread, and crop coordinates guessed from the reduced view land in the wrong place. These tools let Claude look closer before it answers and check every edit it makes.
+
+### Claude uses them on its own
+
+You don't have to ask for a zoom. The server's instructions and the skill tell Claude to inspect dense images before answering about their details, and to crop out "the important parts" itself. In testing with an 8000×5600 floor plan whose labels shrink to about 4px in Claude's view, and a question about a room size, a drawing number and a note:
+
+- **Without the plugin**, Claude couldn't read the labels.
+- **With it**, Claude called `find_detail_regions`, zoomed on the relevant boxes and answered all three correctly, without being told to use any tool.
+- Asked to "crop out the important parts", it chose the floor plan and the title block and saved both at full resolution.
+
+### Full resolution for chat images
+
+Claude Code stores attached images reduced to at most 2000px, so fine detail is gone from that copy. When `chat` gets a reduced copy, the server looks for the full-size original: in the project folder, Desktop, Downloads, Pictures, Documents and screenshot folders. It matches files by aspect ratio and content, and if it finds one, every tool uses the original. Images copied to the clipboard also keep full resolution.
 
 ## Tools
 
@@ -18,7 +30,8 @@ Claude sees images downscaled to about 1568px on the long edge, so small text in
 | `image_info` | Size, format, mode, file size, frames, ICC, key EXIF (flags embedded GPS) | no |
 | `view_image` | Shows any image, including HEIC, TIFF, AVIF, BMP and ICO | no |
 | `grid_overlay` | Labeled pixel-coordinate grid, in original-image pixels | no |
-| `zoom_image` | Crops a region from the full-resolution original and enlarges it, with optional contrast/sharpen | no |
+| `find_detail_regions` | Numbered boxes around dense detail (text blocks, title blocks, legends, labels) | no |
+| `zoom_image` | Crops a region (or `region: N`) from the full-resolution original and enlarges it, with optional contrast/sharpen | no |
 | `split_tiles` | Up to 16 overlapping tiles at full detail, for big dense images | optional |
 | `adjust_image` | Brightness, contrast, sharpness, saturation, autocontrast, grayscale | optional |
 | `crop_image` | Pixel or 0–1 fractional box | yes |

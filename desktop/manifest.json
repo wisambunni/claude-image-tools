@@ -50,6 +50,10 @@
       "description": "Find recent images and chat attachments as numbered thumbnails"
     },
     {
+      "name": "find_detail_regions",
+      "description": "Box the dense detail (text, labels, legends, title blocks) to zoom into or crop"
+    },
+    {
       "name": "grid_overlay",
       "description": "Overlay a labeled pixel-coordinate grid for precise cropping"
     },

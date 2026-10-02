@@ -44,9 +44,19 @@ async def main() -> int:
         tdir = d / "claude" / "projects" / "-fake-project"
         tdir.mkdir(parents=True)
         lines = []
-        for color in ("blue", "green"):
+        # A large original on disk in the project, attached as a 2000px copy (as Claude Code stores it).
+        project = d / "project"
+        project.mkdir()
+        original = Image.new("RGB", (4000, 2000), "white")
+        od = ImageDraw.Draw(original)
+        for i in range(0, 4000, 250):
+            od.rectangle((i, (i // 3) % 1600, i + 120, (i // 3) % 1600 + 300), fill=(i % 255, 80, 160))
+        original.save(project / "plan.png")
+        attachments = [Image.new("RGB", (640, 480), "blue"), original.resize((2000, 1000), Image.Resampling.LANCZOS),
+                       Image.new("RGB", (640, 480), "green")]
+        for att in attachments:
             buf = io.BytesIO()
-            Image.new("RGB", (640, 480), color).save(buf, format="PNG")
+            att.save(buf, format="PNG")
             block = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                  "data": base64.b64encode(buf.getvalue()).decode()}}
             lines.append({"type": "user", "message": {"role": "user", "content": [block, {"type": "text", "text": "hi"}]}})
@@ -56,7 +66,7 @@ async def main() -> int:
         (tdir / f"{session_id}.jsonl").write_text("\n".join(json.dumps(l) for l in lines) + "\n")
         out_dir = d / "outputs"
         env = {**os.environ, "CLAUDE_CONFIG_DIR": str(d / "claude"), "CLAUDE_CODE_SESSION_ID": session_id,
-               "CLAUDE_PLUGIN_DATA": str(d / "plugin-data"), "IMAGE_TOOLS_OUTPUT_DIR": str(out_dir)}
+               "CLAUDE_PLUGIN_DATA": str(d / "plugin-data"), "IMAGE_TOOLS_OUTPUT_DIR": str(out_dir), "CLAUDE_PROJECT_DIR": str(project)}
         params = StdioServerParameters(command="uv", args=["run", "--quiet", "--script", str(SERVER)], env=env)
         async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
             await s.initialize()
@@ -92,20 +102,33 @@ async def main() -> int:
             await call("split_tiles", path=png, rows=2, cols=2, save_dir=str(d / "tiles"))
             await call("view_image", path=str(d / "sample.heic"))
 
-            # chat attachments: chat = latest (green), chat:2 = earlier (blue)
+            # chat attachments: chat = latest (green), chat:2 = plan (has an original on disk), chat:3 = blue
             res = await call("image_info", path="chat")
             await call("crop_image", path="chat", left=0, top=0, right=100, bottom=100)
-            await call("convert_image", path="chat:2", format="webp")
+            await call("convert_image", path="chat:3", format="webp")
             await call("find_images", where="chat")
             await call("find_images", where="recent", days=2)
             outs = sorted(p.name for p in out_dir.iterdir())
             print("chat outputs:", outs)
             colors = {n: Image.open(out_dir / n).convert("RGB").getpixel((5, 5)) for n in outs}
-            if colors.get("chat-image-2_crop.png") != (0, 128, 0) or colors.get("chat-image-1.webp", (0, 0, 0))[2] < 200:
+            if colors.get("chat-image-3_crop.png") != (0, 128, 0) or colors.get("chat-image-1.webp", (0, 0, 0))[2] < 200:
                 failures += 1
                 print("[FAIL] chat images resolved to the wrong attachment:", colors)
-            res = await s.call_tool("crop_image", {"path": "chat:3", "left": 0, "top": 0, "right": 5, "bottom": 5})
-            print(f"[{'ok' if res.isError else 'FAIL'}] chat:3 rejected: {res.content[0].text[:110]}")
+            res = await call("image_info", path="chat:2")
+            if "plan.png" not in res.content[0].text or "4000x2000" not in res.content[0].text:
+                failures += 1
+                print("[FAIL] chat:2 should resolve to the full-resolution original plan.png")
+
+            # detail regions, then zoom/crop by region number
+            res = await call("find_detail_regions", path=png)
+            await call("zoom_image", path=png, region=1)
+            await call("crop_image", path=png, region=1, output_path=str(d / "region1.png"))
+            res = await s.call_tool("zoom_image", {"path": str(f["gif"]), "region": 1})
+            print(f"[{'ok' if res.isError else 'FAIL'}] region without find_detail_regions rejected")
+            failures += 0 if res.isError else 1
+
+            res = await s.call_tool("crop_image", {"path": "chat:4", "left": 0, "top": 0, "right": 5, "bottom": 5})
+            print(f"[{'ok' if res.isError else 'FAIL'}] chat:4 rejected: {res.content[0].text[:110]}")
             failures += 0 if res.isError else 1
 
             if os.environ.get("RUN_CLIPBOARD_TESTS"):

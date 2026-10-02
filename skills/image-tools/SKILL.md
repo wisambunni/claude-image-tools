@@ -1,6 +1,6 @@
 ---
 name: image-tools
-description: How to inspect and edit images with the image-tools MCP server (view, grid_overlay, zoom, split_tiles, crop, resize, rotate/flip, adjust, convert, copy to clipboard). Use whenever the user attaches or pastes an image in chat and wants it edited or examined closely, asks to crop/resize/convert/rotate an image file, mentions HEIC/WebP/AVIF/TIFF files, or when fine detail in a screenshot, photo or scanned document is hard to read.
+description: How to inspect and edit images with the image-tools MCP server (find_detail_regions, zoom, grid_overlay, split_tiles, crop, resize, rotate/flip, adjust, convert, copy to clipboard). Use proactively whenever an image is large or dense (blueprints, schematics, charts, maps, scanned documents, dashboards) and an answer depends on small text or detail; also whenever the user attaches or pastes an image in chat and wants it edited or examined closely, asks to crop/resize/convert/rotate an image file, mentions HEIC/WebP/AVIF/TIFF files, or when fine detail in a screenshot, photo or scanned document is hard to read.
 ---
 
 # Working with images
@@ -24,9 +24,35 @@ If `"chat"` isn't available (the error says so, e.g. in Claude Desktop chat), tr
 
 Results from chat and clipboard images are saved to `~/Downloads/Claude Images/` (or `IMAGE_TOOLS_OUTPUT_DIR`). Tell the user where the file is. Offer `copy_to_clipboard` so they can paste the result directly.
 
+## Use the tools on your own initiative
+
+Don't wait to be asked. When an image is large or dense (blueprints, schematics, engineering drawings, charts, maps, scanned documents, dashboards, long screenshots) and the answer depends on small print, take a closer look before answering:
+
+1. **`find_detail_regions`** draws numbered boxes around the dense detail: text blocks, title blocks, legends, dimensions, labels.
+2. **`zoom_image`** with `region: N` on the boxes relevant to the question. Read values from the zoomed view, never from the overview.
+3. For exact values such as numbers, codes or revision letters, zoom tightly on just that line. If it's still small, zoom tighter. If any character is uncertain, say so.
+
+Text that shrinks to a few pixels in your downscaled view can't be read reliably from the overview, and misreads look plausible. Zooming fixes this.
+
+### "Crop the important parts"
+
+When the user asks you to pull out the important parts of a chart, drawing or document:
+
+1. Decide what "important" means for their purpose from the overview: the plot area and legend of a chart; the title block, notes and key dimensions of a drawing; the totals table of an invoice.
+2. Call `find_detail_regions` (and `grid_overlay` for areas it doesn't box, like a chart's plot area).
+3. Call `crop_image` once per part, with `region: N` or with pixel coordinates read from tool output, and a descriptive `output_path` (e.g. `…/plan_title-block.png`).
+4. Check each preview, then list what you saved and why each part matters.
+
+### Coordinates
+
+You don't see an image at its original size, so positions you estimate by eye are not original pixels. Passing them as pixels lands the zoom or crop in the wrong place. Use, in order of preference:
+- `region: N` from `find_detail_regions`
+- pixel numbers printed by `find_detail_regions`, `grid_overlay` or `image_info`
+- `units: "fraction"` (0-1) for positions you estimate by eye
+
 ## Seeing an image well
 
-You view images downscaled to roughly 1568px on the long edge. Detail smaller than that is lost, so:
+You view images downscaled to 1568-2576px on the long edge, depending on the model. Detail smaller than that is lost, so:
 
 1. **`image_info`** first for anything you will edit: exact size, format, mode, EXIF. Every tool uses the EXIF-rotated orientation, the same one shown in previews.
 2. **`view_image`** for an overview. It also opens formats the Read tool can't (HEIC, TIFF, AVIF, BMP, ICO).

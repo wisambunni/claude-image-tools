@@ -4,6 +4,7 @@
 #     "mcp>=1.10,<2",
 #     "pillow>=11.0",
 #     "pillow-heif>=0.18",
+#     "numpy>=1.26",
 # ]
 # ///
 """Image tools MCP server: lets Claude inspect, crop, zoom, resize and convert images.
@@ -31,7 +32,7 @@ from typing import Annotated, Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 from pydantic import Field
-from PIL import ExifTags, Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL import ExifTags, Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 try:
     from pillow_heif import register_heif_opener
@@ -48,18 +49,28 @@ Tools for seeing and editing images. Every tool's `path` accepts a file path or 
 When the user shares an image in chat and asks to edit or inspect it, use path="chat" - don't ask them to save it.
 If "chat" is unavailable (Claude Desktop chat), try "clipboard", then find_images to locate the file on disk.
 Results from chat/clipboard images are saved to the output folder; copy_to_clipboard puts a result on the clipboard.
-- You see images downscaled to ~1568px. To read small text or fine detail, use zoom_image on the region
-  (it crops the full-resolution original) or split_tiles for large dense images. Don't guess at blurry text.
-- Before cropping, call grid_overlay and read pixel coordinates off its labels (they are in original pixels),
-  then crop_image and check the returned preview.
+
+Use these tools on your own initiative, not only when asked. You see images downscaled (to 1568-2576px on the
+long edge depending on the model), so in large or dense images - blueprints, schematics, charts, maps, scanned
+documents, dashboards, long screenshots - small text, axis labels, legends and annotations can be illegible
+or subtly misread. Before answering about such details:
+  1. find_detail_regions shows where dense detail sits (text blocks, title blocks, legends, labels).
+  2. zoom_image on the regions relevant to the question (it crops the full-resolution original),
+     or split_tiles to read everything. Read values from the zoomed view, never guess from the overview.
+If you're even slightly unsure of a number or word, zoom tighter and confirm before answering.
+Coordinates: you don't see images at their original size, so positions you estimate by eye are NOT original
+pixels. Use region=N from find_detail_regions, pixel numbers from tool output, or units="fraction".
+To crop out "the important parts", decide what matters for the user's purpose from the overview, locate it with
+find_detail_regions or grid_overlay (labels are original-image pixels), crop_image each part, and check each preview.
 - Originals are never modified; outputs are written next to the source with a suffix. Only use overwrite=true
   when the user asked to replace a file.
 """
 
 mcp = FastMCP("image-tools", instructions=INSTRUCTIONS)
 
-# Claude downsamples anything with a long edge above ~1568px, so previews stop there.
-PREVIEW_MAX_EDGE = 1568
+# Claude 4.7+ models see up to 2576px on the long edge (older ones 1568px), but once a conversation holds
+# more than 20 images the API rejects any image over 2000px. 2000 is the most detail that's always safe.
+PREVIEW_MAX_EDGE = 2000
 # Stay well under the ~5MB per-image limit once base64-encoded.
 PREVIEW_MAX_BYTES = 3_500_000
 
@@ -111,6 +122,9 @@ PathArg = Annotated[
         )
     ),
 ]
+
+# Accept the spellings models tend to reach for, so a guess doesn't cost a failed call.
+Units = Literal["px", "pixels", "pixel", "fraction", "fractions", "relative", "normalized"]
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif", ".ico"}
 
@@ -235,7 +249,54 @@ def _from_chat(index: int, images: list[tuple[str, bytes, str]] | None = None) -
         raise LookupError(f"Only {len(images)} image(s) attached in this conversation; chat:{index} doesn't exist.")
     media_type, data, _ = images[-index]
     ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}.get(media_type, ".png")
-    return _materialize(data, f"chat-image-{len(images) - index + 1}", ext)
+    copy = _materialize(data, f"chat-image-{len(images) - index + 1}", ext)
+    return _find_original(copy) or copy
+
+
+# Claude Code shrinks attached images (long edge <= 2000px) before storing them, which destroys
+# fine detail. When the user attached a file from disk, find that full-resolution original.
+CHAT_COPY_MAX_EDGE = 2000
+_ORIGINALS: dict[Path, Path | None] = {}
+
+
+def _find_original(copy: Path) -> Path | None:
+    if copy in _ORIGINALS:
+        return _ORIGINALS[copy]
+    _ORIGINALS[copy] = None
+    with Image.open(copy) as im:
+        cw, ch = im.size
+        if max(cw, ch) < CHAT_COPY_MAX_EDGE * 0.95:
+            return None  # small enough that it was probably sent at full size
+        small = (max(8, cw // 16), max(8, ch // 16))
+        ref = im.convert("L").resize(small, Image.Resampling.BOX)
+
+    candidates: list[Path] = []
+    for root in filter(None, (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd())):
+        for depth_glob in ("*", "*/*", "*/*/*"):
+            candidates += [Path(f) for f in glob.glob(os.path.join(glob.escape(root), depth_glob)) if Path(f).suffix.lower() in IMAGE_EXTS]
+    candidates += _recent_files(days=30, limit=300)
+
+    seen: set[Path] = set()
+    for cand in candidates[:2000]:
+        cand = cand.resolve()
+        if cand in seen or _is_virtual(cand):
+            continue
+        seen.add(cand)
+        try:
+            with Image.open(cand) as im:
+                w, h = ImageOps.exif_transpose(im).size if im.format in ("JPEG", "MPO", "TIFF") else im.size
+                if max(w, h) <= max(cw, ch) or abs(w / h - cw / ch) > 0.01:
+                    continue
+                im = ImageOps.exif_transpose(im)
+                im.draft("L", (small[0] * 2, small[1] * 2))  # fast JPEG decode at reduced size
+                probe = im.convert("L").resize(small, Image.Resampling.BOX)
+        except Exception:
+            continue
+        diff = sum(abs(a - b) for a, b in zip(ref.tobytes(), probe.tobytes())) / (small[0] * small[1])
+        if diff < 6:
+            _ORIGINALS[copy] = cand
+            return cand
+    return None
 
 
 def _from_clipboard() -> Path:
@@ -436,16 +497,42 @@ def _text(s: str) -> TextContent:
     return TextContent(type="text", text=s)
 
 
+# Boxes from the last find_detail_regions call per image, so zoom/crop can take `region=N`.
+_LAST_REGIONS: dict[Path, list[tuple[int, int, int, int]]] = {}
+
+
+def _resolve_box(
+    img: Image.Image,
+    p: Path,
+    region: int | None,
+    left: float | None,
+    top: float | None,
+    right: float | None,
+    bottom: float | None,
+    units: Units,
+) -> tuple[int, int, int, int]:
+    if region is not None:
+        boxes = _LAST_REGIONS.get(p)
+        if not boxes:
+            raise ValueError("No detail regions for this image yet. Call find_detail_regions first, or pass a box.")
+        if not 1 <= region <= len(boxes):
+            raise ValueError(f"region must be between 1 and {len(boxes)}.")
+        return boxes[region - 1]
+    if None in (left, top, right, bottom):
+        raise ValueError("Pass region=N from find_detail_regions, or all of left, top, right, bottom.")
+    return _box_to_pixels(img, left, top, right, bottom, units)
+
+
 def _box_to_pixels(
     img: Image.Image,
     left: float,
     top: float,
     right: float,
     bottom: float,
-    units: Literal["px", "fraction"],
+    units: Units,
 ) -> tuple[int, int, int, int]:
     w, h = img.size
-    if units == "fraction":
+    if units in ("fraction", "fractions", "relative", "normalized"):
         left, right = left * w, right * w
         top, bottom = top * h, bottom * h
     box = (
@@ -499,7 +586,7 @@ def image_info(path: PathArg) -> str:
         mode = raw.mode
 
     lines = [
-        f"path: {p}" + (f" (from {path})" if _is_virtual(p) or path.strip().lower() in ("screenshot", "clipboard") else ""),
+        f"path: {p}" + (f" (resolved from {path!r})" if not _resolve(path).exists() else ""),
         f"format: {fmt}",
         f"size: {w}x{h} px (width x height)",
         f"aspect ratio: {w / h:.4f}",
@@ -533,6 +620,13 @@ def image_info(path: PathArg) -> str:
             pass
     if info_keys:
         lines.append(f"other metadata keys: {', '.join(info_keys)}")
+    if _is_virtual(p) and max(w, h) >= CHAT_COPY_MAX_EDGE * 0.95:
+        lines.append(
+            "note: this is the reduced copy stored by the chat app (fine detail is lost). "
+            "If the user has the original file, ask for its path or have them copy it and use path='clipboard'."
+        )
+    elif not _is_virtual(p) and path.strip().lower().startswith(("chat", "attach")):
+        lines.append("note: using the full-resolution original of the chat attachment found on disk.")
     if max(w, h) > PREVIEW_MAX_EDGE:
         lines.append(
             f"note: long edge exceeds {PREVIEW_MAX_EDGE}px, so a full view is downscaled; "
@@ -610,35 +704,158 @@ def grid_overlay(
 @mcp.tool()
 def zoom_image(
     path: PathArg,
-    left: float,
-    top: float,
-    right: float,
-    bottom: float,
-    units: Literal["px", "fraction"] = "px",
+    left: float | None = None,
+    top: float | None = None,
+    right: float | None = None,
+    bottom: float | None = None,
+    units: Units = "px",
+    region: int | None = None,
     enhance: bool = False,
 ) -> Content:
     """Look closely at one region of an image without saving anything.
 
-    The region is cropped from the full-resolution original and scaled so its long
-    edge is ~1568px, which reveals detail lost when the whole image is downscaled
-    (small text, UI elements, distant objects). Use units="fraction" for 0-1 coordinates.
+    The region is cropped from the full-resolution original and enlarged (up to 8x), which
+    reveals detail lost when the whole image is downscaled: small text, dimensions, axis
+    labels, legends, UI elements, distant objects. Use it unprompted whenever an answer
+    depends on detail you can't read with certainty. Use units="fraction" for 0-1 coordinates.
     Set enhance=true to boost contrast and sharpness, which helps with faint text.
+    To read exact values (numbers, codes, small print), zoom tightly on just those lines: a smaller
+    region means more magnification. If text in the result is still small, zoom tighter.
+    Give the area as region=N (a box number from find_detail_regions - the most reliable option),
+    or as left/top/right/bottom. Pixel values must be ORIGINAL-image pixels, e.g. numbers read from
+    find_detail_regions, grid_overlay or image_info. Positions you estimate by eye from your own view
+    are in a downscaled frame, so pass those as units="fraction" (0-1) instead.
     """
     img, p, _ = _open(path)
-    box = _box_to_pixels(img, left, top, right, bottom, units)
-    region = img.crop(box)
-    rw, rh = region.size
-    factor = PREVIEW_MAX_EDGE / max(rw, rh)
+    box = _resolve_box(img, p, region, left, top, right, bottom, units)
+    area = img.crop(box)
+    rw, rh = area.size
+    factor = min(PREVIEW_MAX_EDGE / max(rw, rh), 8.0)
     if factor > 1:
-        factor = min(factor, 8.0)
         method = Image.Resampling.LANCZOS if factor < 4 else Image.Resampling.BICUBIC
-        region = region.resize((round(rw * factor), round(rh * factor)), method)
+        area = area.resize((round(rw * factor), round(rh * factor)), method)
     if enhance:
-        region = _enhance(region.convert("RGB"), autocontrast=True, sharpness=1.8)
+        area = _enhance(area.convert("RGB"), autocontrast=True, sharpness=1.8)
     return [
-        _text(f"{p.name} region {box} ({rw}x{rh}px) shown at {min(factor, 8.0):.2f}x."),
-        _preview(region),
+        _text(f"{p.name} box {box} ({rw}x{rh}px) shown at {factor:.2f}x."),
+        _preview(area),
     ]
+
+
+def _detail_regions(img: Image.Image, max_regions: int, sensitivity: float) -> list[tuple[tuple[int, int, int, int], float]]:
+    """Find boxes of fine detail (text, labels, dimensions, small symbols).
+
+    Text and small symbols flip between ink and background many times both across and down,
+    while lines, borders and walls flip in only one direction. Scoring each grid cell by the
+    smaller of its horizontal and vertical transition counts keeps the first and drops the second.
+    """
+    import numpy as np
+
+    w, h = img.size
+    scale = min(1.0, 2400 / max(w, h))
+    work = img.convert("L")
+    if scale < 1:
+        work = work.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.Resampling.LANCZOS)
+    gray = np.asarray(work, dtype=np.int16)
+    local_bg = np.asarray(work.filter(ImageFilter.BoxBlur(6)), dtype=np.int16)
+    ink = (np.abs(gray - local_bg) > 40).astype(np.int8)
+    across = np.abs(np.diff(ink, axis=1))[:-1, :]
+    down = np.abs(np.diff(ink, axis=0))[:, :-1]
+
+    cell = max(8, round(max(work.size) / 110))
+    gh, gw = across.shape[0] // cell, across.shape[1] // cell
+    if gh == 0 or gw == 0:
+        return []
+
+    def per_cell(a: "np.ndarray") -> "np.ndarray":
+        return a[: gh * cell, : gw * cell].reshape(gh, cell, gw, cell).sum(axis=(1, 3))
+
+    score = np.minimum(per_cell(across), per_cell(down)).astype(float)
+    occupied = score[score > 0]
+    if occupied.size == 0:
+        return []
+    # Lines and corners score below ~1 transition per cell row; text scores well above it.
+    thresh = max(cell * 1.2, np.percentile(occupied, 90) * 0.35) / sensitivity
+    hot = score >= thresh
+
+    # Merge words and lines of text into blocks: dilate by one cell, then flood-fill components.
+    grown = hot.copy()
+    grown[1:, :] |= hot[:-1, :]
+    grown[:-1, :] |= hot[1:, :]
+    grown[:, 1:] |= hot[:, :-1]
+    grown[:, :-1] |= hot[:, 1:]
+    seen = np.zeros_like(grown)
+    regions = []
+    f = cell / scale
+    for y0, x0 in zip(*np.nonzero(grown)):
+        if seen[y0, x0]:
+            continue
+        stack, ys, xs, total = [(y0, x0)], [], [], 0.0
+        seen[y0, x0] = True
+        while stack:
+            y, x = stack.pop()
+            ys.append(y)
+            xs.append(x)
+            if hot[y, x]:
+                total += score[y, x]
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < gh and 0 <= nx < gw and grown[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        if total == 0 or sum(hot[y, x] for y, x in zip(ys, xs)) < 2:
+            continue  # single specks are noise
+        pad = f * 1.0
+        box = (
+            max(0, int(min(xs) * f - pad)),
+            max(0, int(min(ys) * f - pad)),
+            min(w, int((max(xs) + 1) * f + pad)),
+            min(h, int((max(ys) + 1) * f + pad)),
+        )
+        regions.append((box, total))
+    # Skip regions covering most of the image; they carry no location information.
+    regions = [r for r in regions if (r[0][2] - r[0][0]) * (r[0][3] - r[0][1]) < 0.6 * w * h]
+    regions.sort(key=lambda r: r[1], reverse=True)
+    return regions[:max_regions]
+
+
+@mcp.tool()
+def find_detail_regions(
+    path: PathArg,
+    max_regions: int = 12,
+    sensitivity: float = 1.0,
+) -> Content:
+    """Locate the areas of an image packed with fine detail - text blocks, labels, dimensions, legends,
+    title blocks, small symbols - and show them as numbered boxes with their pixel coordinates.
+
+    Use this first on blueprints, schematics, charts, maps, scanned documents and dense screenshots,
+    then zoom_image (to read) or crop_image (to extract) the regions that matter. Detection is visual,
+    not semantic: you decide which regions are important. Raise sensitivity (e.g. 1.5) to find
+    fainter or smaller details, lower it (0.6) to get only the densest areas.
+    """
+    img, p, _ = _open(path)
+    w, h = img.size
+    regions = _detail_regions(img, max(1, min(max_regions, 30)), max(0.2, min(sensitivity, 3.0)))
+    _LAST_REGIONS[p] = [box for box, _ in regions]
+    if not regions:
+        return [_text(f"{p.name}: no dense detail regions found; the image may be mostly flat color or photographic.")]
+
+    view = img.convert("RGB")
+    scale = min(1.0, PREVIEW_MAX_EDGE / max(w, h))
+    if scale < 1:
+        view = view.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(view)
+    font = _font(max(14, min(view.size) // 45))
+    lw = max(2, min(view.size) // 400)
+    lines = [f"{p.name}: {w}x{h}px. Detail regions, densest first (left, top, right, bottom in original pixels):"]
+    for n, (box, _) in enumerate(regions, 1):
+        vb = [round(v * scale) for v in box]
+        draw.rectangle(vb, outline="#ff2d55", width=lw)
+        tb = draw.textbbox((vb[0], vb[1]), str(n), font=font)
+        draw.rectangle((tb[0] - 3, tb[1] - 2, tb[2] + 3, tb[3] + 2), fill="#ff2d55")
+        draw.text((vb[0], vb[1]), str(n), fill="white", font=font)
+        lines.append(f"  {n}: {box}  ({box[2] - box[0]}x{box[3] - box[1]}px)")
+    lines.append("Next: zoom_image(region=N) to read a box, or crop_image(region=N) to save it.")
+    return [_text("\n".join(lines)), _preview(view)]
 
 
 # ---------------------------------------------------------------------------
@@ -649,24 +866,29 @@ def zoom_image(
 @mcp.tool()
 def crop_image(
     path: PathArg,
-    left: float,
-    top: float,
-    right: float,
-    bottom: float,
-    units: Literal["px", "fraction"] = "px",
+    left: float | None = None,
+    top: float | None = None,
+    right: float | None = None,
+    bottom: float | None = None,
+    units: Units = "px",
+    region: int | None = None,
     output_path: str | None = None,
     overwrite: bool = False,
     show_result: bool = True,
 ) -> Content:
-    """Crop an image to the box (left, top, right, bottom) and save it.
+    """Crop an image to a box and save it.
 
-    Coordinates are pixels by default (right/bottom exclusive), or 0-1 fractions with units="fraction".
+    Give the area as region=N (a box number from find_detail_regions - the most reliable option),
+    or as left/top/right/bottom. Pixel values must be ORIGINAL-image pixels, e.g. numbers read from
+    find_detail_regions, grid_overlay or image_info. Positions you estimate by eye from your own view
+    are in a downscaled frame, so pass those as units="fraction" (0-1) instead.
+    Pixel boxes are right/bottom exclusive.
     The box is clamped to the image bounds. Output defaults to <name>_crop.<ext> next to the original;
     the format follows output_path's extension. The original is never modified unless output_path
     points at it and overwrite=true.
     """
     img, p, fmt = _open(path)
-    box = _box_to_pixels(img, left, top, right, bottom, units)
+    box = _resolve_box(img, p, region, left, top, right, bottom, units)
     cropped = img.crop(box)
     out_fmt = fmt if fmt in EXTENSIONS else "PNG"
     out = _resolve(output_path) if output_path else _default_output(p, "crop", out_fmt)

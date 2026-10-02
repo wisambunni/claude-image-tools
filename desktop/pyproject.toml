@@ -7,4 +7,5 @@ dependencies = [
     "mcp>=1.10,<2",
     "pillow>=11.0",
     "pillow-heif>=0.18",
+    "numpy>=1.26",
 ]
